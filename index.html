@@ -1605,8 +1605,9 @@ document.getElementById('modalCopyBtn').addEventListener('click', () => {
 /* =========================================================
    10. 퀵 북마크 모달 (Ctrl+D / Cmd+D)
    ========================================================= */
+const SITE_URL = 'https://everydaytootoo-ui.github.io/';
 function openBookmarkModal() {
-  const url = window.location.href;
+  const url = SITE_URL;
   document.getElementById('bookmarkUrl').textContent = url;
   document.getElementById('bookmarkModal').classList.remove('hidden');
   document.getElementById('bookmarkModal').classList.add('flex');
@@ -1677,6 +1678,7 @@ document.querySelectorAll('.gen-motion-btn').forEach(btn => {
     btn.classList.add('active');
     genState.motion = btn.dataset.motion;
     document.getElementById('genGifBtn').classList.toggle('hidden', genState.motion === 'none');
+    drawGenPreview();
   });
 });
 document.getElementById('genText').addEventListener('input', drawGenPreview);
@@ -1707,10 +1709,29 @@ function currentGenItem() {
   };
 }
 
+let previewAnimHandle = null;
+let previewAnimStartTime = null;
+function stopPreviewAnimation() {
+  if (previewAnimHandle) { cancelAnimationFrame(previewAnimHandle); previewAnimHandle = null; previewAnimStartTime = null; }
+}
+
 function drawGenPreview() {
   const canvas = document.getElementById('genPreview');
   const item = currentGenItem();
-  drawTextEmoji(canvas.getContext('2d'), canvas.width, item);
+  if (genState.motion === 'none') {
+    stopPreviewAnimation();
+    drawTextEmoji(canvas.getContext('2d'), canvas.width, item);
+  } else if (!previewAnimHandle) {
+    // 이미 루프가 돌고 있으면 매 입력마다 다시 만들 필요 없음 — 다음 프레임에서
+    // currentGenItem()/genState.motion을 새로 읽어오므로 자동으로 반영됨
+    previewAnimStartTime = performance.now();
+    const tick = (now) => {
+      const c = document.getElementById('genPreview');
+      renderMotionFrame(c.getContext('2d'), c.width, currentGenItem(), genState.motion, now - previewAnimStartTime);
+      previewAnimHandle = requestAnimationFrame(tick);
+    };
+    previewAnimHandle = requestAnimationFrame(tick);
+  }
   const reactionCanvas = document.getElementById('genReactionPreview');
   drawTextEmoji(reactionCanvas.getContext('2d'), reactionCanvas.width, item);
   const stickerCanvas = document.getElementById('genStickerPreview');
@@ -1746,48 +1767,52 @@ function easeOutElasticJs(t) {
   return t <= 0 ? 0 : t >= 1 ? 1 : Math.pow(2, -8 * t) * Math.sin((t * 8 - 0.75) * c4) + 1;
 }
 
+const MOTION_LOOP_MS = { pop: 1150, shake: 1300, holo: 1400, marquee: 2200 };
+
+// pop/shake/holo는 모두 "완성된 정적 이모지"를 통째로 변형해서 쓰므로, 텍스트/스타일/
+// 색상이 그대로인 동안은 다시 그리지 않고 재사용합니다 (실시간 미리보기가 매 프레임
+// drawTextEmoji를 새로 호출하지 않도록).
+let _motionBaseCache = { key: '', canvas: null };
+function getMotionBaseCanvas(item, size) {
+  const key = JSON.stringify([item.text, item.style, item.font, item.textColor, item.bgColor, item.stretchX, item.stretchY, size]);
+  if (_motionBaseCache.key !== key) {
+    _motionBaseCache = { key, canvas: renderItemCanvas({ ...item, transparentBg: false }, size) };
+  }
+  return _motionBaseCache.canvas;
+}
+
 // GIF에는 실제 알파 투명도가 없어서(색상 키 방식만 지원) 모션 프레임은 항상
 // 불투명 배경으로 렌더링합니다 — 투명 PNG가 필요하면 기존 PNG 다운로드를 쓰면 됩니다.
-function buildMotionFrames(item, size, motion) {
-  const fps = 24;
-  const frameMs = Math.round(1000 / fps);
-  const frames = [];
+// elapsedMs는 루프 길이를 넘어가도 되고(내부에서 나머지 연산으로 순환), 실시간
+// 미리보기와 GIF 프레임 생성이 이 함수 하나를 그대로 공유합니다.
+function renderMotionFrame(ctx, size, item, motion, elapsedMs) {
+  const totalMs = MOTION_LOOP_MS[motion];
+  ctx.clearRect(0, 0, size, size);
+  if (!totalMs) { ctx.drawImage(getMotionBaseCanvas(item, size), 0, 0); return; }
+  const t = ((elapsedMs % totalMs) + totalMs) % totalMs;
 
   if (motion === 'pop') {
-    const base = renderItemCanvas(item, size);
-    const growN = Math.round(650 / frameMs), holdN = Math.round(500 / frameMs);
-    for (let i = 0; i <= growN; i++) {
-      const scale = Math.max(0.05, easeOutElasticJs(i / growN));
-      const c = document.createElement('canvas'); c.width = size; c.height = size;
-      const ctx = c.getContext('2d');
-      ctx.translate(size/2, size/2); ctx.scale(scale, scale); ctx.translate(-size/2, -size/2);
-      ctx.drawImage(base, 0, 0);
-      frames.push({ canvas: c, delay: frameMs });
-    }
-    for (let i = 0; i < holdN; i++) frames.push({ canvas: base, delay: frameMs });
+    const base = getMotionBaseCanvas(item, size);
+    const growMs = 650;
+    const scale = Math.max(0.05, easeOutElasticJs(Math.min(t / growMs, 1)));
+    ctx.save();
+    ctx.translate(size/2, size/2); ctx.scale(scale, scale); ctx.translate(-size/2, -size/2);
+    ctx.drawImage(base, 0, 0);
+    ctx.restore();
 
   } else if (motion === 'shake') {
-    const base = renderItemCanvas(item, size);
-    const n = Math.round(900 / frameMs);
-    for (let i = 0; i <= n; i++) {
-      const t = i / n;
-      const dx = Math.sin(t * 34) * size * 0.045 * Math.exp(-t * 4.2);
-      const c = document.createElement('canvas'); c.width = size; c.height = size;
-      c.getContext('2d').drawImage(base, dx, 0);
-      frames.push({ canvas: c, delay: frameMs });
-    }
-    frames.push({ canvas: base, delay: 400 });
+    const base = getMotionBaseCanvas(item, size);
+    const durMs = 900;
+    const p = Math.min(t / durMs, 1);
+    const dx = Math.sin(p * 34) * size * 0.045 * Math.exp(-p * 4.2);
+    ctx.drawImage(base, dx, 0);
 
   } else if (motion === 'holo') {
-    const base = renderItemCanvas(item, size);
-    const n = Math.round(1400 / frameMs);
-    for (let i = 0; i < n; i++) {
-      const c = document.createElement('canvas'); c.width = size; c.height = size;
-      const ctx = c.getContext('2d');
-      ctx.filter = `hue-rotate(${Math.round((i / n) * 360)}deg)`;
-      ctx.drawImage(base, 0, 0);
-      frames.push({ canvas: c, delay: frameMs });
-    }
+    const base = getMotionBaseCanvas(item, size);
+    ctx.save();
+    ctx.filter = `hue-rotate(${Math.round((t / totalMs) * 360)}deg)`;
+    ctx.drawImage(base, 0, 0);
+    ctx.restore();
 
   } else if (motion === 'marquee') {
     const bg = document.createElement('canvas'); bg.width = size; bg.height = size;
@@ -1805,37 +1830,53 @@ function buildMotionFrames(item, size, motion) {
     bgCtx.font = `900 ${fontSize}px ${fam}`;
     const textWidth = bgCtx.measureText(item.text).width;
     const travel = size + textWidth;
-    const n = Math.round(2200 / frameMs);
-    for (let i = 0; i < n; i++) {
-      const x = size + textWidth/2 - (i / n) * travel;
-      const c = document.createElement('canvas'); c.width = size; c.height = size;
-      const ctx = c.getContext('2d');
-      ctx.drawImage(bg, 0, 0);
-      ctx.save();
-      roundRect(ctx, size*0.03, size*0.03, size*0.94, size*0.94, size*0.09);
-      ctx.clip();
-      ctx.font = `900 ${fontSize}px ${fam}`;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillStyle = item.textColor || '#ffffff';
-      ctx.fillText(item.text, x, size/2);
-      ctx.restore();
-      frames.push({ canvas: c, delay: frameMs });
-    }
+    const x = size + textWidth/2 - (t / totalMs) * travel;
+    ctx.drawImage(bg, 0, 0);
+    ctx.save();
+    roundRect(ctx, size*0.03, size*0.03, size*0.94, size*0.94, size*0.09);
+    ctx.clip();
+    ctx.font = `900 ${fontSize}px ${fam}`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = item.textColor || '#ffffff';
+    ctx.fillText(item.text, x, size/2);
+    ctx.restore();
+  }
+}
+
+function buildMotionFrames(item, size, motion) {
+  const totalMs = MOTION_LOOP_MS[motion];
+  if (!totalMs) return [];
+  const fps = 24;
+  const frameMs = Math.round(1000 / fps);
+  const n = Math.round(totalMs / frameMs);
+  const frames = [];
+  for (let i = 0; i < n; i++) {
+    const c = document.createElement('canvas'); c.width = size; c.height = size;
+    renderMotionFrame(c.getContext('2d'), size, item, motion, i * frameMs);
+    frames.push({ canvas: c, delay: frameMs });
   }
   return frames;
 }
 
-function generateGif(item, size, motion) {
+// gif.js는 워커를 new Worker(workerScript)로 직접 생성하는데, 브라우저는 다른
+// 출처(cdnjs)의 스크립트로 워커를 만드는 것을 막습니다. 워커 스크립트를 fetch로
+// 받아 blob: URL로 바꿔주면(같은 출처로 취급됨) 이 제한을 우회할 수 있습니다.
+let _gifWorkerBlobUrlPromise = null;
+function getGifWorkerScriptUrl() {
+  if (!_gifWorkerBlobUrlPromise) {
+    _gifWorkerBlobUrlPromise = fetch('https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js')
+      .then(res => res.text())
+      .then(text => URL.createObjectURL(new Blob([text], { type: 'application/javascript' })));
+  }
+  return _gifWorkerBlobUrlPromise;
+}
+
+async function generateGif(item, size, motion) {
   const frames = buildMotionFrames(item, size, motion);
+  const workerScript = await getGifWorkerScriptUrl();
   return new Promise((resolve, reject) => {
     if (!frames.length) { reject(new Error('no frames')); return; }
-    const gif = new GIF({
-      workers: 2,
-      quality: 10,
-      width: size,
-      height: size,
-      workerScript: 'https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js',
-    });
+    const gif = new GIF({ workers: 2, quality: 10, width: size, height: size, workerScript });
     frames.forEach(f => gif.addFrame(f.canvas, { copy: true, delay: f.delay }));
     gif.on('finished', blob => resolve(blob));
     gif.on('abort', () => reject(new Error('gif render aborted')));
@@ -2194,7 +2235,7 @@ document.getElementById('kakaoShareBtn').addEventListener('click', async () => {
   const shareData = {
     title: '회피즐~',
     text: '오늘도 회피즐~ 3초 만에 복사하는 K-직장인 이모지 시트',
-    url: window.location.href,
+    url: SITE_URL,
   };
   // 링크 복사를 항상 가장 먼저·확실하게 시도합니다. 예전에는 navigator.share()를
   // 먼저 await한 뒤 실패(취소 포함)했을 때만 클립보드로 넘어갔는데, 실배포
